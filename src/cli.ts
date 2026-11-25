@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { Bridge, render, type Agent } from './index.ts';
 import { importTranscript } from './adapters.ts';
+import { runTurn } from './runner.ts';
 
 const usage = `Usage:
+  node src/cli.ts run <store> <session> <claude|codex> <prompt>
   node src/cli.ts import <store> <session> <claude|codex> <transcript.jsonl>
   node src/cli.ts prepare <store> <session> <claude|codex>
   node src/cli.ts ack <store> <session> <claude|codex> <batch-id>
@@ -10,10 +12,14 @@ const usage = `Usage:
 Prepare prints the batch ID to stderr and the handoff to stdout. Save the ID and acknowledge only after the target accepted it.`;
 const [command, root, session, rawAgent, argument] = process.argv.slice(2);
 try {
-  if (!root || !session || (rawAgent !== 'claude' && rawAgent !== 'codex') || !['import', 'prepare', 'ack'].includes(command ?? '')) throw new Error(usage);
+  if (!root || !session || (rawAgent !== 'claude' && rawAgent !== 'codex') || !['run', 'import', 'prepare', 'ack'].includes(command ?? '')) throw new Error(usage);
   const agent: Agent = rawAgent;
   const bridge = new Bridge(root, session);
-  if (command === 'import') {
+  if (command === 'run') {
+    if (!argument) throw new Error(usage);
+    const result = await runTurn({ root, session, agent, text: argument, onOutput: chunk => process.stdout.write(chunk) });
+    process.stderr.write(`Completed: ${result.sessionId}, archived events: ${result.omitted}\n`);
+  } else if (command === 'import') {
     if (!argument) throw new Error(usage);
     process.stdout.write(JSON.stringify(importTranscript(bridge, agent, argument, session), null, 2) + '\n');
   } else if (command === 'prepare') {

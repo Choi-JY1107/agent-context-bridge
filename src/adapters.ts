@@ -4,6 +4,14 @@ import { Bridge, sourceId, type Agent, type Event, type Kind } from './index.ts'
 type ObjectRecord = Record<string, unknown>;
 const object = (x: unknown): x is ObjectRecord => typeof x === 'object' && x !== null && !Array.isArray(x);
 
+const START = '[agent-context-bridge:handoff]';
+const END = '[/agent-context-bridge:handoff]';
+function stripHandoff(text: string): string {
+  if (!text.startsWith(START)) return text;
+  const end = text.indexOf(END);
+  return end < 0 ? text : text.slice(end + END.length).trimStart();
+}
+
 /** Convert a source record without reducing tool inputs or outputs. Unknown records are reported. */
 export function normalize(agent: Agent, record: unknown, sessionId: string, source: string, position: string): Event[] | null {
   if (!object(record)) return null;
@@ -18,14 +26,15 @@ export function normalize(agent: Agent, record: unknown, sessionId: string, sour
     }
     if (!object(record.message)) return null;
     const content = record.message.content;
-    if (typeof content === 'string') return [make(record.type, content, 0)];
+    if (typeof content === 'string') return [make(record.type, stripHandoff(content), 0)];
     if (!Array.isArray(content)) return null;
+    const injected = content.some((block: unknown) => object(block) && typeof block.text === 'string' && block.text.startsWith(START));
     return content.flatMap((block, index) => {
       if (!object(block) || typeof block.type !== 'string') return [];
-      if (block.type === 'text') return [make(record.type as Kind, block, index)];
+      if (block.type === 'text') return [make(record.type as Kind, { ...block, text: typeof block.text === 'string' ? stripHandoff(block.text) : block.text }, index)];
       if (block.type === 'tool_use') return [make('tool_call', block, index)];
       if (block.type === 'tool_result') return [make('tool_result', block, index)];
-      if (block.type === 'image' || block.type === 'document') return [make('attachment', block, index)];
+      if (block.type === 'image' || block.type === 'document') return injected ? [] : [make('attachment', block, index)];
       return [];
     });
   }
@@ -33,7 +42,14 @@ export function normalize(agent: Agent, record: unknown, sessionId: string, sour
   const payload = record.payload;
   if (payload.type === 'message') {
     if (payload.role !== 'user' && payload.role !== 'assistant') return [];
-    return [make(payload.role, payload, 0)];
+    const injected = Array.isArray(payload.content) && payload.content.some((block: unknown) => object(block) && typeof block.text === 'string' && block.text.startsWith(START));
+    const blocks = Array.isArray(payload.content) ? payload.content.map((block: unknown) => object(block) && typeof block.text === 'string' ? { ...block, text: stripHandoff(block.text) } : block) : payload.content;
+    const images = !injected && Array.isArray(blocks) ? blocks.flatMap((block: unknown, index: number) => {
+      if (!object(block) || block.type !== 'input_image' || typeof block.image_url !== 'string') return [];
+      const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.*)$/s.exec(block.image_url);
+      return match ? [make('attachment', { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } }, index + 1)] : [];
+    }) : [];
+    return [make(payload.role, { ...payload, content: blocks }, 0), ...images];
   }
   if (payload.type === 'function_call' || payload.type === 'custom_tool_call') return [make('tool_call', payload, 0)];
   if (payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') return [make('tool_result', payload, 0)];
