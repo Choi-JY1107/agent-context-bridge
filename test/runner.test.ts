@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runTurn } from '../src/runner.ts';
+import { canFallback, runTurn, TurnError } from '../src/runner.ts';
 import { Bridge } from '../src/index.ts';
 
 test('successful agent turn imports output and acknowledges handoff', async () => {
@@ -24,3 +24,10 @@ test('successful agent turn imports output and acknowledges handoff', async () =
 });
 function readFileSyncText(file: string): string { return readFileSync(file,'utf8'); }
 import { readFileSync } from 'node:fs';
+
+test('automatic fallback only retries a limit error before tool execution', () => {
+ assert.equal(canFallback(new TurnError('limit', true, false)), true);
+ assert.equal(canFallback(new TurnError('limit after tool', true, true)), false);
+ assert.equal(canFallback(new TurnError('other failure', false, false)), false);
+ assert.equal(canFallback(new Error('usage limit')), false);
+});

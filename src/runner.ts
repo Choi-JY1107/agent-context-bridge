@@ -31,6 +31,23 @@ function save(file: string, value: Sessions): void {
   try { writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 }); renameSync(tmp, file); } finally { rmSync(tmp, { force: true }); }
 }
 
+export class TurnError extends Error {
+  readonly limit: boolean;
+  readonly toolStarted: boolean;
+  constructor(message: string, limit: boolean, toolStarted: boolean) { super(message); this.limit = limit; this.toolStarted = toolStarted; }
+}
+
+export const canFallback = (error: unknown): boolean => error instanceof TurnError && error.limit && !error.toolStarted;
+
+/** Retry with Codex only for a Claude limit error before any tool was started. */
+export async function runAuto(options: Omit<RunOptions, 'agent'>): Promise<{ sessionId: string; omitted: number; agent: Agent }> {
+  try { return { ...await runTurn({ ...options, agent: 'claude' }), agent: 'claude' }; }
+  catch (error) {
+    if (!canFallback(error)) throw error;
+    return { ...await runTurn({ ...options, agent: 'codex' }), agent: 'codex' };
+  }
+}
+
 /** Run one turn, synchronizing local transcripts and acknowledging only successful runs. */
 export async function runTurn(options: RunOptions): Promise<{ sessionId: string; omitted: number }> {
   // Validate the session ID before making any filesystem changes.
@@ -58,6 +75,7 @@ async function runUnlocked(options: RunOptions): Promise<{ sessionId: string; om
     if (!file) throw new Error(`Cannot locate ${side} transcript for session ${id}`);
     importTranscript(bridge, side, file, session);
   }
+  bridge.refresh(agent);
   const batch = bridge.prepare(agent);
   const delivery = buildDelivery(batch, options.root, text);
   const old = meta[agent];
@@ -98,7 +116,13 @@ async function runUnlocked(options: RunOptions): Promise<{ sessionId: string; om
   const success = agent === 'codex'
     ? result.events.some(e => e.type === 'turn.completed') && !result.events.some(e => e.type === 'turn.failed')
     : result.events.some(e => e.type === 'result' && e.is_error !== true);
-  if (result.code !== 0 || !success || !id) throw new Error(`${agent} did not complete successfully (exit ${result.code}): ${result.stderr}`);
+  if (result.code !== 0 || !success || !id) {
+    const errors = result.events.filter(e => e.is_error === true || e.isApiErrorMessage === true || e.error);
+    const details = `${result.stderr} ${JSON.stringify(errors)}`;
+    const limit = agent === 'claude' && /usage[ _-]limit|hit your (?:(?:usage|\d+[- ]hour|weekly) )?limit|limit (?:reached|exceeded)|rate[ _-]?limit|out of (?:extra )?usage|\b429\b/i.test(details);
+    const toolStarted = result.events.some(e => e.type === 'assistant' && obj(e.message) && Array.isArray(e.message.content) && e.message.content.some((b: unknown) => obj(b) && b.type === 'tool_use'));
+    throw new TurnError(`${agent} did not complete successfully (exit ${result.code}): ${result.stderr}`, limit, toolStarted);
+  }
   const transcript = source(agent, id, cwd);
   if (!transcript) throw new Error(`Cannot locate ${agent} transcript after run; batch remains pending`);
   // If import fails, retain the pending batch so an uncertain delivery is not lost.
