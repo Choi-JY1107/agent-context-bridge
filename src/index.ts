@@ -48,6 +48,18 @@ export class Bridge {
       if (lines.length) appendFileSync(this.eventsFile, lines.join('\n') + '\n', { mode: 0o600 });
     });
   }
+  /** Refresh a pending retry before sending, when no previous attempt is in flight. */
+  refresh(target: Agent): void {
+    this.locked(() => {
+      const state = this.state(); const batch = state.pending[target];
+      if (!batch) return;
+      const events = this.events();
+      if (batch.through > events.length) throw new Error('Cursor exceeds event log');
+      const later = events.slice(batch.through).filter(event => event.agent !== target);
+      if (!later.length) return;
+      batch.events.push(...later); batch.through = events.length; this.save(state);
+    });
+  }
   /** A prepared batch is stable until acknowledged; retries send the same batch. */
   prepare(target: Agent): Batch {
     return this.locked(() => {
