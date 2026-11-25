@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 
 export type Agent = 'claude' | 'codex';
 export type Kind = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'notice' | 'attachment';
@@ -8,7 +8,7 @@ export interface Event { id: string; sessionId: string; agent: Agent; kind: Kind
 export interface Batch { id: string; sessionId: string; target: Agent; through: number; events: Event[]; }
 interface State { version: 1; cursor: Record<Agent, number>; pending: Partial<Record<Agent, Batch>>; }
 const empty = (): State => ({ version: 1, cursor: { claude: 0, codex: 0 }, pending: {} });
-const safe = (id: string) => { if (!/^[a-zA-Z0-9_]+$/.test(id)) throw new Error('Invalid session id'); return id; };
+const safe = (id: string) => { if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid session id'); return id; };
 
 /** Single writer per session. Store private transcripts outside the repository. */
 export class Bridge {
@@ -32,14 +32,20 @@ export class Bridge {
     if (text && !text.endsWith('\n')) throw new Error('Incomplete event log; restore or repair it before continuing');
     return text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as Event);
   }
-  append(event: Event): void {
+  append(event: Event): void { this.appendMany([event]); }
+  appendMany(incoming: readonly Event[]): void {
     this.locked(() => {
-      safe(event.sessionId);
-      if (event.sessionId !== this.dir.split(/[\\/]/).at(-1)) throw new Error('Session mismatch');
-      const events = this.events();
-      const found = events.find((item) => item.id === event.id);
-      if (found) { if (JSON.stringify(found) !== JSON.stringify(event)) throw new Error('Conflicting event id'); return; }
-      appendFileSync(this.eventsFile, JSON.stringify(event) + '\n', { mode: 0o600 });
+      const known = new Map(this.events().map((event) => [event.id, JSON.stringify(event)]));
+      const lines: string[] = [];
+      for (const event of incoming) {
+        safe(event.sessionId);
+        if (event.sessionId !== this.dir.split(/[\\/]/).at(-1)) throw new Error('Session mismatch');
+        const serialized = JSON.stringify(event);
+        const found = known.get(event.id);
+        if (found !== undefined) { if (found !== serialized) throw new Error('Conflicting event id'); continue; }
+        known.set(event.id, serialized); lines.push(serialized);
+      }
+      if (lines.length) appendFileSync(this.eventsFile, lines.join('\n') + '\n', { mode: 0o600 });
     });
   }
   /** A prepared batch is stable until acknowledged; retries send the same batch. */
